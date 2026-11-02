@@ -41,7 +41,7 @@
 
 <script>
 // EDIT: address of the results service (the Cloudflare Worker) followed by /d, no trailing slash
-const DATA_BASE = 'https://YOUR-WORKER.workers.dev/d';
+const DATA_BASE = 'https://ezregatta-results.ezregatta.workers.dev/d';
 
 const slug = new URLSearchParams(location.search).get('o') || '';
 const SLUG_OK = /^[a-f0-9]{16,64}$/;
