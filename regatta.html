@@ -55,7 +55,7 @@
 
 <script>
 // EDIT: address of the results service (the Cloudflare Worker) followed by /d, no trailing slash
-const DATA_BASE = 'https://ezregatta-results.ezregatta.workers.dev/d';
+const DATA_BASE = 'https://YOUR-WORKER.workers.dev/d';
 
 const slug = new URLSearchParams(location.search).get('r') || '';
 const SLUG_OK = /^[a-f0-9]{16,64}$/;
@@ -69,7 +69,26 @@ const SHADE = { NotScored:'sh-red', RET:'sh-r2', DNC:'sh-r2', DNF:'sh-r2', DNS:'
 const textOn = hex => { const n = parseInt(hex.slice(1), 16);
   return ((n>>16)*299 + ((n>>8)&255)*587 + (n&255)*114) / 1000 > 150 ? '#111' : '#fff'; };
 const POLL_MS = 15000;      // how often an open page checks for new results (paused while the tab is hidden)
-let timer, last = '', busy = false;
+let last = '', busy = false;
+// Polling that backs off when nothing changes, so tabs left open all day stay cheap: the base interval for
+// 2 minutes after the last change, then every 30 s, then every 60 s; polling stops after 2 hours without a change
+// (Refresh or returning to the tab resumes it). Hidden tabs never poll.
+let lastChange = Date.now(), timer, stopped = false;
+function nextDelay() {
+  const idle = Date.now() - lastChange;
+  return idle < 120000 ? POLL_MS : idle < 600000 ? Math.max(POLL_MS, 30000) : Math.max(POLL_MS, 60000);
+}
+function schedule() {
+  clearTimeout(timer);
+  if (stopped) return;
+  if (Date.now() - lastChange > 7200000) {
+    document.getElementById('stamp').textContent = 'Paused to save data. Tap Refresh to resume.';
+    return;
+  }
+  timer = setTimeout(async () => { if (!document.hidden) await load(); schedule(); }, nextDelay());
+}
+function wake() { lastChange = Date.now(); schedule(); }      // someone is here: reset the back-off
+
 
 async function load() {
   if (busy) return;
@@ -80,7 +99,7 @@ async function load() {
     const res = await fetch(`${DATA_BASE}/regattas/${slug}.json?t=${Date.now()}`, { cache: 'no-store' });
     if (!res.ok) { const e = new Error('Results not found. Check the link, or the organiser may have removed them.'); e.fatal = true; throw e; }
     const txt = await res.text();
-    if (txt !== last) { last = txt; render(JSON.parse(txt)); }      // redraw only when something changed
+    if (txt !== last) { last = txt; lastChange = Date.now(); render(JSON.parse(txt)); }      // redraw only when something changed
     err.textContent = '';
     stamp.textContent = 'Checked ' + new Date().toLocaleTimeString();
   } catch (e) {
@@ -99,7 +118,10 @@ function render(d) {
     esc(d.name) + `<span class="badge ${d.isFinal ? 'final' : ''}">${d.isFinal ? 'Final' : 'In progress'}</span>`;
   const series = SLUG_OK.test(d.seriesSlug || '')
     ? `<a href="series.html?s=${encodeURIComponent(d.seriesSlug)}">${esc(d.seriesName)} standings</a> · ` : '';
-  document.getElementById('meta').innerHTML = series + new Date(d.startDate).toLocaleDateString(undefined, {dateStyle:'long'})
+  // Several fleets in the current race and the regatta isn't final: link to the live Fleet Board.
+  const board = (d.hasBoard && !d.isFinal)
+    ? `<a href="board.html?r=${encodeURIComponent(slug)}"><b>Fleet Board</b></a> · ` : '';
+  document.getElementById('meta').innerHTML = board + series + new Date(d.startDate).toLocaleDateString(undefined, {dateStyle:'long'})
     + ' · Updated ' + new Date(d.updated).toLocaleString();
 
   let h = '<thead><tr>';
@@ -132,14 +154,14 @@ function render(d) {
   }
   document.getElementById('tbl').innerHTML = h + '</tbody>';
 
-  if (d.isFinal) clearInterval(timer);      // final results: stop polling (the Refresh button still works)
+  if (d.isFinal) { stopped = true; clearTimeout(timer); }      // final results: stop polling (the Refresh button still works)
 }
 
 if (!SLUG_OK.test(slug)) document.getElementById('err').textContent = 'No results specified. Use the link from the organiser.';
 else {
-  document.getElementById('refresh').onclick = load;
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
-  timer = setInterval(() => { if (!document.hidden) load(); }, POLL_MS);
+  document.getElementById('refresh').onclick = () => { wake(); load(); };
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { wake(); load(); } });
+  schedule();
   load();
 }
 </script>

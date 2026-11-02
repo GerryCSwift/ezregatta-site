@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<meta name="referrer" content="no-referrer">
+<title>Fleet Board</title>
+<style>
+  :root { --bg:#fff; --fg:#111; --muted:#667; --head:#1e5bd8; --band:rgba(128,128,128,.22);
+          --promote:#1f9d3f; --demote:#e0281c; --note:#c27a00; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#111418; --fg:#eee; --muted:#9aa; --head:#6aa0ff; --promote:#30d158; --demote:#ff453a; --note:#ffb340; }
+  }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--fg);
+         font:16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  a { color:var(--head); }
+  .top { display:flex; flex-wrap:wrap; gap:4px 16px; font-size:.85rem; margin:0 0 6px; }
+  .reg { display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; font-size:1.1rem; }
+  h1 { font-size:1.7rem; margin:6px 0 8px; }
+  .banner { margin:0 0 10px; padding:6px 10px; border-radius:6px; background:var(--band); color:var(--note); font-weight:600; }
+  .live { color:var(--muted); font-size:.8rem; margin:0 0 12px; display:flex; gap:10px; align-items:center; }
+  .live button { font:inherit; padding:1px 10px; border:1px solid var(--muted); border-radius:6px;
+                 background:transparent; color:var(--fg); }
+  .legend { color:var(--muted); font-size:.8rem; margin:0 0 12px; }
+  .legend .p { color:var(--promote); font-weight:700; } .legend .d { color:var(--demote); font-weight:700; }
+  .fleets { display:flex; gap:8px; align-items:flex-start; overflow-x:auto; padding-bottom:8px; }
+  .fleet { min-width:96px; text-align:center; }
+  .fleet h2 { font-size:1.5rem; margin:0 0 6px; padding:5px 10px; background:var(--band); white-space:nowrap; }
+  .sail { font-size:2rem; line-height:1.25; font-variant-numeric:tabular-nums; }
+  .sail.promote { color:var(--promote); font-weight:700; }
+  .sail.demote { color:var(--demote); font-weight:700; }
+  #err { color:#c00; }
+  .foot { color:var(--muted); font-size:.75rem; margin-top:16px; }
+</style>
+</head>
+<body>
+<div class="top" id="top"></div>
+<div class="reg"><span id="reg">Loading…</span><span id="date"></span></div>
+<h1 id="title">Fleet Assignments</h1>
+<div class="banner" id="banner" hidden></div>
+<div class="live"><button id="refresh" type="button">Refresh</button><span id="stamp"></span></div>
+<div class="legend"><span class="p">Green</span> promoted &middot; <span class="d">red</span> relegated</div>
+<div class="fleets" id="fleets"></div>
+<p id="err"></p>
+<div class="foot">Scoring by ezRegatta, a Broadreach Services Application</div>
+
+<script>
+// EDIT: address of the results service (the Cloudflare Worker) followed by /d, no trailing slash
+const DATA_BASE = 'https://YOUR-WORKER.workers.dev/d';
+
+const slug = new URLSearchParams(location.search).get('r') || '';
+const SLUG_OK = /^[a-f0-9]{16,64}$/;
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// same order as heatColors in the app (index 0 = none); a fleet's number is its colour index
+const PALETTE = [null,'#34C759','#FF9500','#007AFF','#FF3B30','#30B0C7','#AF52DE','#5856D6','#FFCC00'];
+
+const POLL_MS = 10000;      // how often an open board checks for changes (paused while the tab is hidden)
+let last = '', busy = false;
+// Polling that backs off when nothing changes, so tabs left open all day stay cheap: the base interval for
+// 2 minutes after the last change, then every 30 s, then every 60 s; polling stops after 2 hours without a change
+// (Refresh or returning to the tab resumes it). Hidden tabs never poll.
+let lastChange = Date.now(), timer, stopped = false;
+function nextDelay() {
+  const idle = Date.now() - lastChange;
+  return idle < 120000 ? POLL_MS : idle < 600000 ? Math.max(POLL_MS, 30000) : Math.max(POLL_MS, 60000);
+}
+function schedule() {
+  clearTimeout(timer);
+  if (stopped) return;
+  if (Date.now() - lastChange > 7200000) {
+    document.getElementById('stamp').textContent = 'Paused to save data. Tap Refresh to resume.';
+    return;
+  }
+  timer = setTimeout(async () => { if (!document.hidden) await load(); schedule(); }, nextDelay());
+}
+function wake() { lastChange = Date.now(); schedule(); }      // someone is here: reset the back-off
+
+
+async function load() {
+  if (busy) return;
+  busy = true;
+  const err = document.getElementById('err'), stamp = document.getElementById('stamp');
+  stamp.textContent = 'Checking…';
+  try {
+    const res = await fetch(`${DATA_BASE}/boards/${slug}.json?t=${Date.now()}`, { cache: 'no-store' });
+    if (!res.ok) {
+      const e = new Error('No fleet board for this regatta. It may have a single fleet, or the link may be wrong.');
+      e.fatal = true; throw e;
+    }
+    const txt = await res.text();
+    if (txt !== last) { last = txt; lastChange = Date.now(); render(JSON.parse(txt)); }      // redraw only when something changed
+    err.textContent = '';
+    stamp.textContent = 'Checked ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    if (!last || e.fatal) err.textContent = e.message;
+    else stamp.textContent = 'Connection problem, retrying…';
+  } finally { busy = false; }
+}
+
+function render(d) {
+  document.title = d.regattaName + ' – Fleet Board';
+  let top = `<a href="regatta.html?r=${encodeURIComponent(slug)}">&larr; Results</a>`;
+  if (SLUG_OK.test(d.ownerSlug || '')) top += `<a href="owner.html?o=${encodeURIComponent(d.ownerSlug)}">All Results List</a>`;
+  document.getElementById('top').innerHTML = top;
+  document.getElementById('reg').textContent = d.regattaName;
+  document.getElementById('date').textContent = new Date(d.startDate).toLocaleDateString(undefined, { dateStyle:'long' });
+  document.getElementById('title').textContent = `Fleet Assignments - Race ${d.raceNum}`;
+
+  const banner = document.getElementById('banner');
+  const msg = d.isFinal ? 'Racing is finished. This board is no longer updated.'
+            : d.complete ? `Race ${d.raceNum} is scored. This page will switch to the next race when it is added.` : '';
+  banner.textContent = msg;
+  banner.hidden = !msg;
+
+  document.getElementById('fleets').innerHTML = (d.fleets || []).map(f => {
+    const col = PALETTE[f.heat];
+    const sails = (f.skippers || []).map(s =>
+      `<div class="sail ${s.mark === 'promote' ? 'promote' : s.mark === 'demote' ? 'demote' : ''}">` +
+      `${esc(String(s.sail).padStart(2, '0'))}</div>`).join('');
+    return `<div class="fleet"><h2${col ? ` style="color:${col}"` : ''}>${esc(f.name)}</h2>${sails}</div>`;
+  }).join('');
+
+  if (d.isFinal) { stopped = true; clearTimeout(timer); }      // regatta finished: stop polling (Refresh still works)
+}
+
+if (!SLUG_OK.test(slug)) document.getElementById('err').textContent = 'No regatta specified. Use the link from the results page.';
+else {
+  document.getElementById('refresh').onclick = () => { wake(); load(); };
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { wake(); load(); } });
+  schedule();
+  load();
+}
+</script>
+</body>
+</html>

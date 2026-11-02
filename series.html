@@ -56,7 +56,7 @@
 
 <script>
 // EDIT: address of the results service (the Cloudflare Worker) followed by /d, no trailing slash
-const DATA_BASE = 'https://ezregatta-results.ezregatta.workers.dev/d';
+const DATA_BASE = 'https://YOUR-WORKER.workers.dev/d';
 
 const slug = new URLSearchParams(location.search).get('s') || '';
 const SLUG_OK = /^[a-f0-9]{16,64}$/;
@@ -69,6 +69,25 @@ const SHADE = { NotScored:'sh-red', RET:'sh-r2', DNC:'sh-r2', DNF:'sh-r2', DNS:'
 
 const POLL_MS = 15000;      // how often an open page checks for new standings (paused while the tab is hidden)
 let last = '', busy = false;
+// Polling that backs off when nothing changes, so tabs left open all day stay cheap: the base interval for
+// 2 minutes after the last change, then every 30 s, then every 60 s; polling stops after 2 hours without a change
+// (Refresh or returning to the tab resumes it). Hidden tabs never poll.
+let lastChange = Date.now(), timer, stopped = false;
+function nextDelay() {
+  const idle = Date.now() - lastChange;
+  return idle < 120000 ? POLL_MS : idle < 600000 ? Math.max(POLL_MS, 30000) : Math.max(POLL_MS, 60000);
+}
+function schedule() {
+  clearTimeout(timer);
+  if (stopped) return;
+  if (Date.now() - lastChange > 7200000) {
+    document.getElementById('stamp').textContent = 'Paused to save data. Tap Refresh to resume.';
+    return;
+  }
+  timer = setTimeout(async () => { if (!document.hidden) await load(); schedule(); }, nextDelay());
+}
+function wake() { lastChange = Date.now(); schedule(); }      // someone is here: reset the back-off
+
 
 async function load() {
   if (busy) return;
@@ -79,7 +98,7 @@ async function load() {
     const res = await fetch(`${DATA_BASE}/series/${slug}.json?t=${Date.now()}`, { cache: 'no-store' });
     if (!res.ok) { const e = new Error('Standings not found. Check the link, or they may not be published yet.'); e.fatal = true; throw e; }
     const txt = await res.text();
-    if (txt !== last) { last = txt; render(JSON.parse(txt)); }      // redraw only when something changed
+    if (txt !== last) { last = txt; lastChange = Date.now(); render(JSON.parse(txt)); }      // redraw only when something changed
     err.textContent = '';
     stamp.textContent = 'Checked ' + new Date().toLocaleTimeString();
   } catch (e) {
@@ -90,9 +109,9 @@ async function load() {
 
 if (!SLUG_OK.test(slug)) document.getElementById('err').textContent = 'No series specified. Use the link from the organiser.';
 else {
-  document.getElementById('refresh').onclick = load;
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
-  setInterval(() => { if (!document.hidden) load(); }, POLL_MS);
+  document.getElementById('refresh').onclick = () => { wake(); load(); };
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { wake(); load(); } });
+  schedule();
   load();
 }
 
